@@ -120,6 +120,31 @@ def predictions(result, model_name):
     return _layout(fig, "Predicted vs actual revenue on the test weeks", "Week", "Revenue")
 
 
+def error_by_horizon(mae, model_name):
+    lines = {
+        "predicted": (model_name, dict(color=ORANGE, width=3)),
+        "naive": ("Naive (last week)", dict(color=GREY, dash="dot")),
+        "seasonal": ("Seasonal naive (same week last year)", dict(color=BLUE, dash="dash")),
+    }
+    fig = go.Figure()
+    for column in mae.columns:
+        name, line = lines[column]
+        fig.add_scatter(x=mae.index, y=mae[column], name=name, line=line, mode="lines+markers")
+    fig.update_xaxes(dtick=1)
+    fig.update_yaxes(tickformat=",.0f", rangemode="tozero")
+    return _layout(fig, "Average forecast error by weeks ahead", "Weeks ahead", "MAE")
+
+
+def actual_vs_forecast(bt):
+    df = bt.reset_index(names="week")
+    fig = px.scatter(df, x="actual", y="predicted", hover_data=["week", "origin", "h"], color_discrete_sequence=[ORANGE], opacity=0.6)
+    top = max(df["actual"].max(), df["predicted"].max())
+    fig.add_scatter(x=[0, top], y=[0, top], mode="lines", line=dict(color=GREY, dash="dash"), name="Perfect forecast")
+    fig.update_xaxes(tickformat=",.0f")
+    fig.update_yaxes(tickformat=",.0f")
+    return _layout(fig, "Backtest forecasts vs actual revenue", "Actual revenue", "Forecast")
+
+
 def anomaly_trend(trend):
     fig = go.Figure()
     fig.add_bar(x=trend.index, y=trend["anomalies"], name="Anomalies", marker_color=RED)

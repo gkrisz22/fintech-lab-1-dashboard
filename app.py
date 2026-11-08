@@ -25,8 +25,12 @@ def get_anomalies(contamination):
 @st.cache_data
 def get_prediction(weekly, model_name, test_weeks, horizon):
     result, metrics, error_std = predictive.evaluate(weekly, model_name, test_weeks)
+    bt = None
+    if len(weekly) >= predictive.backtest_min_weeks(test_weeks, horizon):
+        bt = predictive.backtest(weekly, model_name, test_weeks, horizon)
+        error_std = predictive.horizon_rmse(bt).to_numpy()
     fc = predictive.forecast(weekly, model_name, horizon, error_std)
-    return result, metrics, fc
+    return result, metrics, fc, bt
 
 
 def money(value):
@@ -125,7 +129,7 @@ def predictive_section(sales, start, end):
     horizon = cols[2].slider("Forecast horizon (weeks)", min_value=1, max_value=12, value=8)
 
     try:
-        result, metrics, fc = get_prediction(weekly, model_name, test_weeks, horizon)
+        result, metrics, fc, bt = get_prediction(weekly, model_name, test_weeks, horizon)
     except ValueError as exc:
         st.warning(str(exc))
         return
@@ -135,9 +139,10 @@ def predictive_section(sales, start, end):
     cols[0].metric("Next week forecast", money(fc["forecast"].iloc[0]))
     cols[1].metric(f"Total for the next {horizon} weeks", money(fc["forecast"].sum()))
     st.plotly_chart(charts.forecast(weekly, fc))
+    band_source = "the backtest errors for each week ahead" if bt is not None else "the one week ahead test errors"
     st.caption(
         "The model predicts weekly revenue from the last four weeks and the month. "
-        "The shaded band is the range where 95% of the weeks should fall, based on the test errors."
+        f"The shaded band is the range where 95% of the weeks should fall, based on {band_source}."
     )
 
     st.subheader("ML predictions")
@@ -165,6 +170,32 @@ def predictive_section(sales, start, end):
     st.caption(
         "MAE and RMSE are the average errors in revenue, MAPE is the average error in percent and "
         f"R2 shows how much of the weekly variation the model explains. {verdict}"
+    )
+
+    st.subheader("Forecast validation")
+    if bt is None:
+        st.info(
+            f"Validating the {horizon} week forecast needs at least {predictive.backtest_min_weeks(test_weeks, horizon)} weeks, "
+            f"the current filter leaves {len(weekly)}. Widen the date range or lower the test weeks or the horizon."
+        )
+        return
+    summary = predictive.backtest_summary(bt)
+    cols = st.columns(4)
+    cols[0].metric("Forecast accuracy", f"{summary['accuracy']:.0%}", help="1 minus the total absolute error divided by the total actual revenue")
+    cols[1].metric("Error reduction vs naive", f"{summary['skill']:+.0%}", help="How much lower the average error is than repeating the last known week")
+    cols[2].metric("Weeks inside the 95% band", f"{summary['coverage']:.0%}", help="Close to 95% means the band width is realistic")
+    cols[3].metric("Next week average error", money(summary["mae_next_week"]))
+
+    mae = predictive.error_by_horizon(bt)
+    left, right = st.columns(2)
+    left.plotly_chart(charts.error_by_horizon(mae, model_name))
+    right.plotly_chart(charts.actual_vs_forecast(bt))
+    better = int((mae["predicted"] < mae["naive"]).sum())
+    st.caption(
+        f"The forecast was rerun at each of the last {test_weeks} possible start weeks using only the data before it, "
+        f"and its {horizon} week forecasts were compared with the actual revenue. "
+        f"The model has a lower error than the naive baseline in {better} of the {horizon} weeks ahead. "
+        "Points close to the dashed line are accurate forecasts."
     )
 
 

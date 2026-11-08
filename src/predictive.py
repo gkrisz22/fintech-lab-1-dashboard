@@ -86,7 +86,10 @@ def evaluate(weekly, model_name, test_weeks):
 
 
 def forecast(weekly, model_name, horizon, error_std):
-    """Refit on all weeks and forecast `horizon` weeks ahead, feeding predictions back as lags."""
+    """Refit on all weeks and forecast `horizon` weeks ahead, feeding predictions back as lags.
+
+    `error_std` is one value for every week or an array with one value per week ahead.
+    """
     if not 1 <= horizon <= 52:
         raise ValueError("horizon must be between 1 and 52 weeks")
     data = make_features(weekly)
@@ -107,3 +110,77 @@ def forecast(weekly, model_name, horizon, error_std):
     out["lower"] = (out["forecast"] - 1.96 * error_std).clip(lower=0)
     out["upper"] = out["forecast"] + 1.96 * error_std
     return out
+
+
+def backtest_min_weeks(origins, horizon):
+    """Weeks of history needed to backtest `origins` cut-off weeks with a `horizon` week forecast."""
+    return MIN_TRAIN_ROWS + len(LAGS) + origins + horizon - 1
+
+
+def backtest(weekly, model_name, origins, horizon):
+    """Walk-forward test of the live forecast.
+
+    At each of the last `origins` cut-off weeks the model is refit on the weeks before it and
+    forecasts `horizon` weeks recursively, like `forecast`. Returns one row per forecast week with
+    the actual value, the forecast and two baselines: the last known week and the same week a year earlier.
+    """
+    if len(weekly) < backtest_min_weeks(origins, horizon):
+        raise ValueError(f"backtest needs at least {backtest_min_weeks(origins, horizon)} weeks")
+    rows = []
+    last = len(weekly) - horizon
+    for cut in range(last - origins + 1, last + 1):
+        train, actual = weekly.iloc[:cut], weekly.iloc[cut : cut + horizon]
+        predicted = forecast(train, model_name, horizon, 0.0)["forecast"]
+        rows.append(
+            pd.DataFrame(
+                {
+                    "origin": train.index[-1],
+                    "h": np.arange(1, horizon + 1),
+                    "actual": actual.to_numpy(),
+                    "predicted": predicted.to_numpy(),
+                    "naive": train.iloc[-1],
+                    "seasonal": weekly.reindex(actual.index - pd.Timedelta(weeks=52)).to_numpy(),
+                },
+                index=actual.index,
+            )
+        )
+    return pd.concat(rows)
+
+
+def horizon_rmse(bt):
+    """Root mean squared forecast error for each week ahead, used as the width of the forecast band."""
+    error = bt["actual"] - bt["predicted"]
+    return np.sqrt((error**2).groupby(bt["h"]).mean())
+
+
+def error_by_horizon(bt):
+    """MAE of the model and the baselines for each week ahead.
+
+    The seasonal baseline is left out when the data does not reach a year back for every forecast week.
+    """
+    columns = ["predicted", "naive"] + (["seasonal"] if bt["seasonal"].notna().all() else [])
+    return bt[columns].sub(bt["actual"], axis=0).abs().groupby(bt["h"]).mean()
+
+
+def band_coverage(bt, z=1.96):
+    """Share of actual weeks inside the forecast band.
+
+    The band for each cut-off week is built from the errors of the other cut-off weeks,
+    so the check is not done on the same errors that set the band width.
+    """
+    inside = []
+    for origin, group in bt.groupby("origin"):
+        width = z * group["h"].map(horizon_rmse(bt[bt["origin"] != origin]))
+        inside.append((group["actual"] - group["predicted"]).abs() <= width)
+    return pd.concat(inside).mean()
+
+
+def backtest_summary(bt):
+    """Overall accuracy of the backtest forecasts."""
+    error = (bt["actual"] - bt["predicted"]).abs()
+    return {
+        "accuracy": 1 - error.sum() / bt["actual"].sum(),
+        "skill": 1 - error.mean() / (bt["actual"] - bt["naive"]).abs().mean(),
+        "coverage": band_coverage(bt),
+        "mae_next_week": error[bt["h"] == 1].mean(),
+    }
